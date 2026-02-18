@@ -1,0 +1,26 @@
+{
+  "name": "agent-memory-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Alan's memory system, backed by LanceDB with hybrid BM25 + vector search",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@lancedb/lancedb": "^0.13.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@xenova/transformers": "^2.17.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}
