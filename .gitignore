@@ -1,2 +1,28 @@
-node_modules
-dist
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# macOS
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# Editor temp files
+*.swp
+*~
+
+# Logs
+*.log
+
+# Test coverage
+coverage/
+.nyc_output/
