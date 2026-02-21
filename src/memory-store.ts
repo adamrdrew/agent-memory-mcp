@@ -31,6 +31,7 @@ export class LanceMemoryStore implements MemoryStore {
   private db: lancedb.Connection | null = null;
   private table: lancedb.Table | null = null;
   private ftsIndexCreated = false;
+  private reranker: lancedb.rerankers.RRFReranker | null = null;
 
   constructor(
     private readonly dbPath: string,
@@ -39,10 +40,13 @@ export class LanceMemoryStore implements MemoryStore {
 
   async initialize(): Promise<void> {
     this.db = await lancedb.connect(this.dbPath);
+    this.reranker = await lancedb.rerankers.RRFReranker.create(60);
     const names = await this.db.tableNames();
     if (names.includes('memories')) {
       this.table = await this.db.openTable('memories');
-      this.ftsIndexCreated = true;
+      // Recreate FTS index with proper config (stemming, stop words, positions).
+      // replace: true makes this idempotent; negligible cost at our scale.
+      await this.tryCreateFtsIndex();
     }
   }
 
@@ -102,7 +106,9 @@ export class LanceMemoryStore implements MemoryStore {
     if (!original) throw new Error(`Memory ${memoryId} not found`);
 
     const results = await this.table
-      .search(original.vector as number[])
+      .query()
+      .nearestTo(original.vector as number[])
+      .distanceType('cosine')
       .limit(limit + 1)
       .toArray();
 
@@ -199,7 +205,7 @@ export class LanceMemoryStore implements MemoryStore {
   ): Promise<SearchResult[]> {
     const vector = await this.embedder.embed(query);
     const overFetch = limit * 3;
-    let search = this.table!.search(vector).limit(overFetch);
+    let search = this.table!.query().nearestTo(vector).distanceType('cosine').limit(overFetch);
     search = applyWhereClause(search, filters);
     const rows = await search.toArray();
     return postFilter(rows, filters).slice(0, limit).map(resultToSearchResult);
@@ -227,11 +233,29 @@ export class LanceMemoryStore implements MemoryStore {
     filters: SearchFilters,
     limit: number,
   ): Promise<SearchResult[]> {
-    const [semantic, keyword] = await Promise.all([
-      this.semanticSearch(query, filters, limit * 2),
-      this.keywordSearch(query, filters, limit * 2),
-    ]);
-    return reciprocalRankFusion(semantic, keyword, limit);
+    if (!this.ftsIndexCreated || !this.reranker) {
+      // FTS index not available — degrade to semantic-only.
+      return this.semanticSearch(query, filters, limit);
+    }
+
+    try {
+      const vector = await this.embedder.embed(query);
+      const overFetch = limit * 3;
+      let search = this.table!
+        .query()
+        .nearestTo(vector)
+        .distanceType('cosine')
+        .fullTextSearch(query)
+        .rerank(this.reranker)
+        .limit(overFetch);
+      search = applyWhereClause(search, filters);
+      const rows = await search.toArray();
+      return postFilter(rows, filters).slice(0, limit).map(resultToSearchResult);
+    } catch {
+      // Built-in hybrid can fail if FTS index is stale or missing.
+      // Fall back to semantic-only.
+      return this.semanticSearch(query, filters, limit);
+    }
   }
 
   // ── Private: table management ──────────────────────────────────
@@ -254,7 +278,16 @@ export class LanceMemoryStore implements MemoryStore {
   private async tryCreateFtsIndex(): Promise<void> {
     if (this.ftsIndexCreated || !this.table) return;
     try {
-      await this.table.createIndex('content', { config: lancedb.Index.fts() });
+      await this.table.createIndex('content', {
+        config: lancedb.Index.fts({
+          withPosition: true,
+          stem: true,
+          language: 'English',
+          removeStopWords: true,
+          asciiFolding: true,
+        }),
+        replace: true,
+      });
       this.ftsIndexCreated = true;
     } catch {
       // Index creation may fail on very small tables; keyword search degrades gracefully.
@@ -300,15 +333,18 @@ function rowToMemory(row: Record<string, unknown>): Memory {
 }
 
 function resultToSearchResult(row: Record<string, unknown>): SearchResult {
-  // Vector search returns _distance (lower = more similar).
-  // FTS search returns _score (higher = more relevant) but NOT _distance.
-  // The old code defaulted missing _distance to 0, which gave every FTS
-  // result a perfect score of 1.0.
+  // Three possible score fields depending on search mode:
+  //   _relevance_score — from the RRF reranker (hybrid search), higher = better
+  //   _distance — from vector search (cosine: 0–2 range), lower = better
+  //   _score — from FTS/BM25 search, higher = better
+  const relevanceScore = row._relevance_score as number | undefined;
   const distance = row._distance as number | undefined;
   const ftsScore = row._score as number | undefined;
 
   let score: number;
-  if (distance != null) {
+  if (relevanceScore != null) {
+    score = relevanceScore;
+  } else if (distance != null) {
     score = 1 / (1 + distance);
   } else if (ftsScore != null) {
     score = ftsScore;
@@ -317,29 +353,6 @@ function resultToSearchResult(row: Record<string, unknown>): SearchResult {
   }
 
   return { memory: rowToMemory(row), score };
-}
-
-function reciprocalRankFusion(
-  listA: SearchResult[],
-  listB: SearchResult[],
-  limit: number,
-  k: number = 60,
-): SearchResult[] {
-  const fused = new Map<string, { result: SearchResult; score: number }>();
-
-  for (const [list, weight] of [[listA, 1.0], [listB, 1.0]] as const) {
-    list.forEach((result, rank) => {
-      const id = result.memory.id;
-      const entry = fused.get(id) ?? { result, score: 0 };
-      entry.score += weight / (k + rank + 1);
-      fused.set(id, entry);
-    });
-  }
-
-  return Array.from(fused.values())
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map(({ result, score }) => ({ ...result, score }));
 }
 
 function applyWhereClause<T extends { where(predicate: string): T }>(

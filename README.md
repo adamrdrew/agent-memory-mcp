@@ -83,3 +83,7 @@ npm run build        # Compile TypeScript to dist/
 npm test             # Run all tests
 npm run test:watch   # Run tests in watch mode
 ```
+
+## License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
