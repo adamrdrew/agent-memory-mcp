@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { TransformersEmbedder } from './embedder.js';
 import { HardcopyMemoryStore } from './hardcopy-store.js';

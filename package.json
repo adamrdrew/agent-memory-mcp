@@ -1,17 +1,42 @@
 {
-  "name": "agent-memory-mcp",
+  "name": "@adamrdrew/agent-memory-mcp",
   "version": "1.0.0",
-  "description": "MCP server for Alan's memory system, backed by LanceDB with hybrid BM25 + vector search",
+  "description": "MCP server for persistent agent memory — hybrid BM25 + vector search backed by LanceDB with local ONNX embeddings. No API keys, fully local.",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "agent-memory-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "!dist/**/*.test.*",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
   },
+  "keywords": [
+    "mcp",
+    "memory",
+    "lancedb",
+    "vector-search",
+    "bm25",
+    "embeddings",
+    "model-context-protocol",
+    "agent-memory"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adamrdrew/agent-memory-mcp.git"
+  },
+  "author": "Adam Drew",
   "dependencies": {
     "@lancedb/lancedb": "^0.26.2",
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -23,5 +48,8 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
