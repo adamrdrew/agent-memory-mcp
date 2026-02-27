@@ -1,6 +1,6 @@
 {
   "name": "@adamrdrew/agent-memory-mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "MCP server for persistent agent memory — hybrid BM25 + vector search backed by LanceDB with local ONNX embeddings. No API keys, fully local.",
   "license": "GPL-3.0-or-later",
   "type": "module",
