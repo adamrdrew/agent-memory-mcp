@@ -112,10 +112,10 @@ export class LanceMemoryStore implements MemoryStore {
       .limit(limit + 1)
       .toArray();
 
-    return results
-      .filter((r: Record<string, unknown>) => r.id !== memoryId)
-      .slice(0, limit)
-      .map(resultToSearchResult);
+    return toResults(
+      results.filter((r: Record<string, unknown>) => r.id !== memoryId),
+      limit,
+    );
   }
 
   async listRecent(limit: number = 10, category?: MemoryCategory): Promise<Memory[]> {
@@ -208,7 +208,7 @@ export class LanceMemoryStore implements MemoryStore {
     let search = this.table!.query().nearestTo(vector).distanceType('cosine').limit(overFetch);
     search = applyWhereClause(search, filters);
     const rows = await search.toArray();
-    return postFilter(rows, filters).slice(0, limit).map(resultToSearchResult);
+    return toResults(postFilter(rows, filters), limit);
   }
 
   private async keywordSearch(
@@ -221,7 +221,7 @@ export class LanceMemoryStore implements MemoryStore {
       let search = this.table!.search(query, 'fts').limit(overFetch);
       search = applyWhereClause(search, filters);
       const rows = await search.toArray();
-      return postFilter(rows, filters).slice(0, limit).map(resultToSearchResult);
+      return toResults(postFilter(rows, filters), limit);
     } catch {
       // FTS index may not exist yet; keyword search degrades gracefully.
       return [];
@@ -250,7 +250,7 @@ export class LanceMemoryStore implements MemoryStore {
         .limit(overFetch);
       search = applyWhereClause(search, filters);
       const rows = await search.toArray();
-      return postFilter(rows, filters).slice(0, limit).map(resultToSearchResult);
+      return toResults(postFilter(rows, filters), limit);
     } catch {
       // Built-in hybrid can fail if FTS index is stale or missing.
       // Fall back to semantic-only.
@@ -332,6 +332,53 @@ function rowToMemory(row: Record<string, unknown>): Memory {
   };
 }
 
+// ── Temporal decay ──────────────────────────────────────────────────
+// Exponential decay based on memory age. Recent memories score higher
+// when semantic relevance is similar. Configurable via MEMORY_DECAY_HALF_LIFE
+// env var (days). Default 30 days. Set to 0 to disable.
+// Memories tagged "evergreen" or "never-forget" are exempt.
+
+const DECAY_HALF_LIFE_DAYS = parseDecayHalfLife(process.env.MEMORY_DECAY_HALF_LIFE);
+export const EVERGREEN_TAGS = new Set(['evergreen', 'never-forget']);
+const MS_PER_DAY = 86_400_000;
+
+export function parseDecayHalfLife(value: string | undefined): number {
+  if (value == null) return 30;           // default: 30 days
+  const parsed = Number(value);
+  if (isNaN(parsed) || parsed <= 0) return 0; // 0 or negative = disabled
+  return parsed;
+}
+
+export function computeDecayFactor(updatedAt: string, halfLifeDays: number): number {
+  if (halfLifeDays <= 0) return 1;        // decay disabled
+  const ageMs = Date.now() - new Date(updatedAt).getTime();
+  const ageDays = Math.max(0, ageMs / MS_PER_DAY);
+  return Math.pow(0.5, ageDays / halfLifeDays);
+}
+
+function isEvergreen(row: Record<string, unknown>): boolean {
+  try {
+    const tags: string[] = JSON.parse(row.tags as string);
+    return tags.some(t => EVERGREEN_TAGS.has(t));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Convert raw rows to SearchResults with temporal decay applied, then
+ * re-sort by decayed score (descending) and trim to the requested limit.
+ * Re-sorting is necessary because decay can reorder results — a highly
+ * relevant but old memory may now score lower than a moderately relevant
+ * but recent one.
+ */
+function toResults(rows: Record<string, unknown>[], limit: number): SearchResult[] {
+  return rows
+    .map(resultToSearchResult)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
 function resultToSearchResult(row: Record<string, unknown>): SearchResult {
   // Three possible score fields depending on search mode:
   //   _relevance_score — from the RRF reranker (hybrid search), higher = better
@@ -350,6 +397,12 @@ function resultToSearchResult(row: Record<string, unknown>): SearchResult {
     score = ftsScore;
   } else {
     score = 0;
+  }
+
+  // Apply temporal decay unless memory is evergreen
+  if (DECAY_HALF_LIFE_DAYS > 0 && !isEvergreen(row)) {
+    const updatedAt = row.updated_at as string;
+    score *= computeDecayFactor(updatedAt, DECAY_HALF_LIFE_DAYS);
   }
 
   return { memory: rowToMemory(row), score };
