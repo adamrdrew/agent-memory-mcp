@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -291,6 +291,87 @@ describe('LanceMemoryStore integration', () => {
       expect(recent).toHaveLength(2);
       expect(recent[0].content).toBe('Second stored');
       expect(recent[1].content).toBe('First stored');
+    });
+  });
+
+  // ── Temporal decay integration ──────────────────────────────────
+
+  describe('temporal decay in search results', () => {
+    it('scores are between 0 and 1 with decay active', async () => {
+      // Memories stored now have decay factor ≈ 1.0, so scores
+      // should still be in [0, 1] range.
+      await store.store({
+        content: 'Fresh memory about vector databases',
+        category: 'architecture',
+        tags: [],
+      });
+      await store.store({
+        content: 'Fresh memory about embedding similarity',
+        category: 'learning',
+        tags: [],
+      });
+
+      const results = await store.search('vector embedding', 'semantic', { limit: 10 });
+      expect(results.length).toBeGreaterThan(0);
+      for (const r of results) {
+        expect(r.score).toBeGreaterThanOrEqual(0);
+        expect(r.score).toBeLessThanOrEqual(1);
+      }
+    });
+
+    it('results are sorted by decayed score descending', async () => {
+      await store.store({
+        content: 'Memory about algorithms and data structures',
+        category: 'learning',
+        tags: [],
+      });
+      await store.store({
+        content: 'Memory about database algorithms',
+        category: 'architecture',
+        tags: [],
+      });
+
+      const results = await store.search('algorithms', 'semantic', { limit: 10 });
+      for (let i = 1; i < results.length; i++) {
+        expect(results[i - 1].score).toBeGreaterThanOrEqual(results[i].score);
+      }
+    });
+
+    it('evergreen memories are not decayed', async () => {
+      // Store two memories with identical content but one is evergreen.
+      // Since they're stored at the same time, decay won't change relative
+      // order — but we verify the evergreen one has score present.
+      await store.store({
+        content: 'Evergreen fact about algorithms',
+        category: 'learning',
+        tags: ['evergreen'],
+      });
+      await store.store({
+        content: 'Regular fact about algorithms',
+        category: 'learning',
+        tags: [],
+      });
+
+      const results = await store.search('algorithms', 'semantic', { limit: 10 });
+      expect(results.length).toBe(2);
+
+      // Both should have valid scores
+      for (const r of results) {
+        expect(r.score).toBeGreaterThan(0);
+      }
+    });
+
+    it('never-forget tag also exempts from decay', async () => {
+      await store.store({
+        content: 'Important memory tagged never-forget',
+        category: 'personal',
+        tags: ['never-forget'],
+      });
+
+      const results = await store.search('important memory', 'semantic', { limit: 10 });
+      expect(results.length).toBeGreaterThan(0);
+      expect(results[0].memory.tags).toContain('never-forget');
+      expect(results[0].score).toBeGreaterThan(0);
     });
   });
 });

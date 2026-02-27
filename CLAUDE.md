@@ -20,6 +20,7 @@ MCP (Model Context Protocol) server for a memory system backed by LanceDB with h
 
 - `MEMORY_DB_PATH` (required) — LanceDB database path on disk
 - `EMBEDDING_MODEL` (optional) — HuggingFace model ID, defaults to `Xenova/all-MiniLM-L6-v2`
+- `MEMORY_DECAY_HALF_LIFE` (optional) — temporal decay half-life in days, defaults to `30`. Set to `0` to disable decay
 - `ENABLE_HARDCOPY` — set to `'true'` to enable JSON file backup
 - `HARDCOPY_PATH` (required if hardcopy enabled) — directory for JSON mirror files
 
@@ -32,7 +33,7 @@ Embedder → MemoryStore → [HardcopyMemoryStore] → MCP Server → stdio tran
 
 **Key interfaces** (`src/types.ts`): `Embedder`, `MemoryStore`, `SearchFilters`, `Memory`, `SearchResult`. All components code against these interfaces, enabling mock-based unit testing.
 
-**LanceMemoryStore** (`src/memory-store.ts`): The main storage layer. Uses LanceDB with a fixed 7-column schema (id, content, category, tags as JSON string, created_at, updated_at, vector). Search uses over-fetching (3× limit) with post-filtering. Category/date filters are SQL WHERE clauses; tag filtering is done in-memory after search. Updates use delete-then-re-add (LanceDB limitation). Hybrid search combines BM25 FTS + cosine vector via RRF reranking, with graceful fallback to semantic-only if FTS index is unavailable.
+**LanceMemoryStore** (`src/memory-store.ts`): The main storage layer. Uses LanceDB with a fixed 7-column schema (id, content, category, tags as JSON string, created_at, updated_at, vector). Search uses over-fetching (3× limit) with post-filtering. Category/date filters are SQL WHERE clauses; tag filtering is done in-memory after search. Updates use delete-then-re-add (LanceDB limitation). Hybrid search combines BM25 FTS + cosine vector via RRF reranking, with graceful fallback to semantic-only if FTS index is unavailable. Search results have exponential temporal decay applied (configurable half-life, default 30 days) so recent memories score higher. Memories tagged `evergreen` or `never-forget` are exempt from decay. Results are re-sorted by decayed score before returning.
 
 **HardcopyMemoryStore** (`src/hardcopy-store.ts`): Decorator pattern — wraps any MemoryStore and mirrors mutations to `{id}.json` files on disk. Write-only (reads delegate to inner store). Errors are logged to stderr but never propagate.
 
@@ -40,10 +41,11 @@ Embedder → MemoryStore → [HardcopyMemoryStore] → MCP Server → stdio tran
 
 ## Testing
 
-Three test files in `tests/`:
+Four test files in `tests/`:
 - `tools.test.ts` — unit tests for all tool handlers using mocks from `tests/mocks.ts`
-- `integration.test.ts` — tests LanceMemoryStore with real LanceDB on a temp directory
+- `integration.test.ts` — tests LanceMemoryStore with real LanceDB on a temp directory (includes temporal decay integration tests)
 - `hardcopy.test.ts` — tests the hardcopy decorator file operations
+- `temporal-decay.test.ts` — unit tests for decay math (`computeDecayFactor`, `parseDecayHalfLife`, `EVERGREEN_TAGS`)
 
 `MockEmbedder` produces deterministic hash-based pseudo-vectors. `MockMemoryStore` is an in-memory implementation with substring search matching.
 

@@ -11,6 +11,7 @@ All data stays on your machine. Embeddings are generated locally using [all-Mini
 - **12 memory categories** — structured taxonomy for organising memories
 - **Batch operations** — store multiple memories in a single call
 - **Hardcopy backup** — optional JSON file mirror of all mutations for human-readable backup
+- **Temporal decay** — exponential time-based decay favors recent memories when relevance is similar. Configurable half-life, with `evergreen` and `never-forget` tag exemptions
 - **Fully local** — all data stays on disk, no network dependencies after first model download
 
 ## Installation
@@ -61,6 +62,7 @@ Add to your project's `.mcp.json`:
 |---|---|---|
 | `MEMORY_DB_PATH` | Yes | Path to the LanceDB database directory |
 | `EMBEDDING_MODEL` | No | HuggingFace model ID (default: `Xenova/all-MiniLM-L6-v2`) |
+| `MEMORY_DECAY_HALF_LIFE` | No | Decay half-life in days (default: `30`). Set to `0` to disable temporal decay |
 | `ENABLE_HARDCOPY` | No | Set to `true` to enable JSON file backup |
 | `HARDCOPY_PATH` | If hardcopy enabled | Directory for JSON mirror files |
 
@@ -87,6 +89,14 @@ The `search` tool supports three modes:
 - **`semantic`** — cosine vector similarity only.
 
 All modes support filtering by category, tags, and date range.
+
+## Temporal Decay
+
+Search results are scored with exponential time-based decay so that recent memories surface above older ones when semantic relevance is similar. The decay follows a half-life model: a memory one half-life old has its score halved, two half-lives old gets quartered, and so on.
+
+- **Default half-life**: 30 days (configurable via `MEMORY_DECAY_HALF_LIFE`)
+- **Disable**: set `MEMORY_DECAY_HALF_LIFE=0`
+- **Exempt tags**: memories tagged `evergreen` or `never-forget` are never decayed
 
 ## Memory Categories
 
