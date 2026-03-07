@@ -48,9 +48,38 @@ export class LanceMemoryStore implements MemoryStore {
     const names = await this.db.tableNames();
     if (names.includes('memories')) {
       this.table = await this.db.openTable('memories');
+      // Migrate schema: add access_count and last_accessed_at columns if missing.
+      // These were introduced in v1.1.2 for importance-driven decay.
+      await this.migrateSchema();
       // Recreate FTS index with proper config (stemming, stop words, positions).
       // replace: true makes this idempotent; negligible cost at our scale.
       await this.tryCreateFtsIndex();
+    }
+  }
+
+  /**
+   * Migrate the table schema to include columns added in newer versions.
+   * Uses LanceDB's addColumns with SQL defaults — a metadata-only operation.
+   * Idempotent: silently skips if columns already exist.
+   */
+  private async migrateSchema(): Promise<void> {
+    if (!this.table) return;
+
+    try {
+      // Probe for access_count by reading a single row
+      const probe = await this.table.query().limit(1).toArray();
+      if (probe.length > 0 && !('access_count' in probe[0])) {
+        console.log('[MemoryStore] Migrating schema: adding access_count and last_accessed_at columns');
+        await this.table.addColumns([
+          { name: 'access_count', valueSql: '0' },
+          { name: 'last_accessed_at', valueSql: 'updated_at' },
+        ]);
+        console.log('[MemoryStore] Schema migration complete');
+      }
+    } catch (err) {
+      // Non-fatal: if migration fails, the store degrades gracefully
+      // (null coalescing in importanceMultiplier handles missing fields)
+      console.warn('[MemoryStore] Schema migration failed (non-fatal):', err);
     }
   }
 
