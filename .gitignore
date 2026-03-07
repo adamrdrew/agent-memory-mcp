@@ -1,6 +1,8 @@
 # Dependencies
 node_modules/
 
+.nova
+
 # Build output
 dist/
 
