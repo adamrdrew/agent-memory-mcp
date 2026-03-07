@@ -29,6 +29,20 @@ type MemoryRow = Record<string, unknown> & {
   last_accessed_at: string;
 };
 
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Safely read access_count from a LanceDB row.
+ * LanceDB's addColumns with `valueSql: '0'` creates Int64 columns,
+ * which come back as BigInt in JavaScript. Arithmetic with BigInt and
+ * Number throws, so we coerce here.
+ */
+function safeAccessCount(row: Record<string, unknown>): number {
+  const v = row.access_count;
+  if (v == null) return 0;
+  return Number(v);
+}
+
 // ── LanceMemoryStore ───────────────────────────────────────────────
 
 export class LanceMemoryStore implements MemoryStore {
@@ -207,7 +221,7 @@ export class LanceMemoryStore implements MemoryStore {
       created_at: existing.created_at as string,
       updated_at: now,
       vector,
-      access_count: (existing.access_count as number) ?? 0,
+      access_count: safeAccessCount(existing),
       last_accessed_at: (existing.last_accessed_at as string) ?? (existing.updated_at as string),
     };
 
@@ -251,7 +265,7 @@ export class LanceMemoryStore implements MemoryStore {
     const accessCounts: { id: string; content: string; count: number }[] = [];
 
     for (const row of rows) {
-      const ac = (row.access_count as number) ?? 0;
+      const ac = safeAccessCount(row);
       totalAccessCount += ac;
       if (ac === 0) neverAccessed++;
       accessCounts.push({
@@ -305,7 +319,7 @@ export class LanceMemoryStore implements MemoryStore {
     for (const row of rows) {
       if (isEvergreen(row)) continue;
 
-      const accessCount = (row.access_count as number) ?? 0;
+      const accessCount = safeAccessCount(row);
       const effectiveHalfLife = DECAY_HALF_LIFE_DAYS * importanceMultiplier(row);
       const ageMs = Date.now() - new Date(row.updated_at).getTime();
       const ageDays = Math.max(0, ageMs / MS_PER_DAY);
@@ -371,7 +385,7 @@ export class LanceMemoryStore implements MemoryStore {
         await this.table.delete(`id = '${sanitise(id)}'`);
         const updatedRow = {
           ...row,
-          access_count: ((row.access_count as number) ?? 0) + 1,
+          access_count: safeAccessCount(row) + 1,
           last_accessed_at: now,
         };
         await this.table.add([updatedRow]);
@@ -551,7 +565,7 @@ export function computeDecayFactor(updatedAt: string, halfLifeDays: number): num
  * Range: 1.0 (never accessed, old) to 3.0 (heavily accessed, recent).
  */
 export function importanceMultiplier(row: Record<string, unknown>): number {
-  const accessCount = (row.access_count as number) ?? 0;
+  const accessCount = safeAccessCount(row);
   const lastAccessedAt = (row.last_accessed_at as string) ?? (row.updated_at as string);
 
   // Access frequency boost: linear ramp, 1.0 to 2.0, capped at 20 accesses
