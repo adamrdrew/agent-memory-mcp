@@ -4,6 +4,8 @@ import type {
   MemoryCategory,
   MemoryStore,
   MemoryStats,
+  PruneOptions,
+  PruneResult,
   SearchFilters,
   SearchMode,
   SearchResult,
@@ -131,6 +133,20 @@ export class MockMemoryStore implements MemoryStore {
       byCategory,
       oldestMemory: sorted[0]?.createdAt ?? null,
       newestMemory: sorted.at(-1)?.createdAt ?? null,
+      neverAccessed: this.memories.length,
+      belowPruneThreshold: 0,
+      avgAccessCount: 0,
+      mostAccessed: [],
+    };
+  }
+
+  async prune(options: PruneOptions = {}): Promise<PruneResult> {
+    const { dryRun = true } = options;
+    return {
+      pruned: 0,
+      inspected: this.memories.length,
+      dryRun,
+      candidates: [],
     };
   }
 

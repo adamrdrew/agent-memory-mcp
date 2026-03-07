@@ -186,6 +186,25 @@ export function handleStats(store: MemoryStore) {
   };
 }
 
+export function handlePrune(store: MemoryStore) {
+  return async (args: {
+    dryRun?: boolean;
+    minStrength?: number;
+    maxDormantDays?: number;
+  }): Promise<ReturnType<typeof success>> => {
+    try {
+      const result = await store.prune({
+        dryRun: args.dryRun,
+        minStrength: args.minStrength,
+        maxDormantDays: args.maxDormantDays,
+      });
+      return success(result);
+    } catch (err) {
+      return error(`Prune failed: ${String(err)}`);
+    }
+  };
+}
+
 // ── Registration ───────────────────────────────────────────────────
 
 export function registerTools(server: McpServer, store: MemoryStore): void {
@@ -284,8 +303,19 @@ export function registerTools(server: McpServer, store: MemoryStore): void {
 
   server.tool(
     'stats',
-    'Get memory database statistics: total count, breakdown by category, oldest and newest timestamps.',
+    'Get memory database statistics: total count, breakdown by category, oldest and newest timestamps, access patterns, and prune-eligible counts.',
     {},
     handleStats(store),
+  );
+
+  server.tool(
+    'prune',
+    'Prune low-strength and dormant memories. Dry-run by default — shows candidates without deleting. Set dryRun: false to actually prune. Evergreen memories are always preserved.',
+    {
+      dryRun: z.boolean().optional().default(true).describe('Preview mode — show what would be pruned without deleting'),
+      minStrength: z.number().optional().default(0.05).describe('Prune memories with strength below this value'),
+      maxDormantDays: z.number().optional().default(90).describe('Prune never-accessed memories older than this many days'),
+    },
+    handlePrune(store),
   );
 }

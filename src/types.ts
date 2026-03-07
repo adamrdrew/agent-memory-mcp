@@ -38,6 +38,24 @@ export interface MemoryStats {
   byCategory: Record<string, number>;
   oldestMemory: string | null;
   newestMemory: string | null;
+  // Access tracking stats
+  neverAccessed: number;
+  belowPruneThreshold: number;
+  avgAccessCount: number;
+  mostAccessed: { id: string; content: string; count: number }[];
+}
+
+export interface PruneOptions {
+  dryRun?: boolean;        // default true
+  minStrength?: number;    // default 0.05
+  maxDormantDays?: number; // default 90
+}
+
+export interface PruneResult {
+  pruned: number;
+  inspected: number;
+  dryRun: boolean;
+  candidates: { id: string; content: string; strength: number; reason: string }[];
 }
 
 // ── Request shapes ─────────────────────────────────────────────────
@@ -83,4 +101,5 @@ export interface MemoryStore {
   update(id: string, updates: UpdateRequest): Promise<Memory>;
   delete(id: string): Promise<void>;
   stats(): Promise<MemoryStats>;
+  prune(options: PruneOptions): Promise<PruneResult>;
 }

@@ -5,6 +5,8 @@ import type {
   MemoryCategory,
   MemoryStore,
   MemoryStats,
+  PruneOptions,
+  PruneResult,
   SearchFilters,
   SearchMode,
   SearchResult,
@@ -23,6 +25,8 @@ type MemoryRow = Record<string, unknown> & {
   created_at: string;
   updated_at: string;
   vector: number[];
+  access_count: number;
+  last_accessed_at: string;
 };
 
 // ── LanceMemoryStore ───────────────────────────────────────────────
@@ -89,14 +93,24 @@ export class LanceMemoryStore implements MemoryStore {
 
     const limit = filters.limit ?? 10;
 
+    let results: SearchResult[];
     switch (mode) {
       case 'semantic':
-        return this.semanticSearch(query, filters, limit);
+        results = await this.semanticSearch(query, filters, limit);
+        break;
       case 'keyword':
-        return this.keywordSearch(query, filters, limit);
+        results = await this.keywordSearch(query, filters, limit);
+        break;
       case 'hybrid':
-        return this.hybridSearch(query, filters, limit);
+        results = await this.hybridSearch(query, filters, limit);
+        break;
     }
+
+    // Fire-and-forget access tracking for returned results
+    const ids = results.map(r => r.memory.id);
+    this.touchAccessed(ids).catch(() => {});
+
+    return results;
   }
 
   async findRelated(memoryId: string, limit: number = 5): Promise<SearchResult[]> {
@@ -112,10 +126,16 @@ export class LanceMemoryStore implements MemoryStore {
       .limit(limit + 1)
       .toArray();
 
-    return toResults(
+    const finalResults = toResults(
       results.filter((r: Record<string, unknown>) => r.id !== memoryId),
       limit,
     );
+
+    // Fire-and-forget access tracking
+    const ids = finalResults.map(r => r.memory.id);
+    this.touchAccessed(ids).catch(() => {});
+
+    return finalResults;
   }
 
   async listRecent(limit: number = 10, category?: MemoryCategory): Promise<Memory[]> {
@@ -158,6 +178,8 @@ export class LanceMemoryStore implements MemoryStore {
       created_at: existing.created_at as string,
       updated_at: now,
       vector,
+      access_count: (existing.access_count as number) ?? 0,
+      last_accessed_at: (existing.last_accessed_at as string) ?? (existing.updated_at as string),
     };
 
     await this.table.delete(`id = '${sanitise(id)}'`);
@@ -175,7 +197,12 @@ export class LanceMemoryStore implements MemoryStore {
 
   async stats(): Promise<MemoryStats> {
     if (!this.table) {
-      return { totalMemories: 0, byCategory: {}, oldestMemory: null, newestMemory: null };
+      return {
+        totalMemories: 0, byCategory: {},
+        oldestMemory: null, newestMemory: null,
+        neverAccessed: 0, belowPruneThreshold: 0,
+        avgAccessCount: 0, mostAccessed: [],
+      };
     }
 
     const rows = (await this.table.query().toArray()) as Record<string, unknown>[];
@@ -188,12 +215,141 @@ export class LanceMemoryStore implements MemoryStore {
 
     const sorted = [...memories].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
+    // Access tracking stats
+    let neverAccessed = 0;
+    let belowPruneThreshold = 0;
+    let totalAccessCount = 0;
+    const accessCounts: { id: string; content: string; count: number }[] = [];
+
+    for (const row of rows) {
+      const ac = (row.access_count as number) ?? 0;
+      totalAccessCount += ac;
+      if (ac === 0) neverAccessed++;
+      accessCounts.push({
+        id: row.id as string,
+        content: (row.content as string).slice(0, 80),
+        count: ac,
+      });
+
+      // Check prune eligibility
+      if (!isEvergreen(row)) {
+        const effHL = DECAY_HALF_LIFE_DAYS * importanceMultiplier(row);
+        const ageDays = Math.max(
+          0,
+          (Date.now() - new Date(row.updated_at as string).getTime()) / MS_PER_DAY,
+        );
+        const strength = Math.pow(0.5, ageDays / effHL);
+        if (strength < 0.05 || (ac === 0 && ageDays > 90)) {
+          belowPruneThreshold++;
+        }
+      }
+    }
+
+    accessCounts.sort((a, b) => b.count - a.count);
+
     return {
       totalMemories: memories.length,
       byCategory,
       oldestMemory: sorted[0]?.createdAt ?? null,
       newestMemory: sorted.at(-1)?.createdAt ?? null,
+      neverAccessed,
+      belowPruneThreshold,
+      avgAccessCount: memories.length > 0
+        ? Math.round((totalAccessCount / memories.length) * 10) / 10
+        : 0,
+      mostAccessed: accessCounts.slice(0, 5),
     };
+  }
+
+  // ── Pruning ────────────────────────────────────────────────────
+
+  async prune(options: PruneOptions = {}): Promise<PruneResult> {
+    const { dryRun = true, minStrength = 0.05, maxDormantDays = 90 } = options;
+
+    if (!this.table) {
+      return { pruned: 0, inspected: 0, dryRun, candidates: [] };
+    }
+
+    const rows = (await this.table.query().toArray()) as MemoryRow[];
+    const candidates: PruneResult['candidates'] = [];
+
+    for (const row of rows) {
+      if (isEvergreen(row)) continue;
+
+      const accessCount = (row.access_count as number) ?? 0;
+      const effectiveHalfLife = DECAY_HALF_LIFE_DAYS * importanceMultiplier(row);
+      const ageMs = Date.now() - new Date(row.updated_at).getTime();
+      const ageDays = Math.max(0, ageMs / MS_PER_DAY);
+      const strength = effectiveHalfLife > 0
+        ? Math.pow(0.5, ageDays / effectiveHalfLife)
+        : 0;
+
+      let reason = '';
+      if (strength < minStrength) {
+        reason = `strength ${strength.toFixed(4)} < ${minStrength}`;
+      } else if (accessCount === 0 && ageDays > maxDormantDays) {
+        reason = `never accessed, ${Math.floor(ageDays)} days old > ${maxDormantDays}`;
+      }
+
+      if (reason) {
+        candidates.push({
+          id: row.id,
+          content: row.content.slice(0, 120),
+          strength,
+          reason,
+        });
+      }
+    }
+
+    let pruned = 0;
+    if (!dryRun && candidates.length > 0) {
+      for (const c of candidates) {
+        await this.delete(c.id);
+        pruned++;
+      }
+    }
+
+    return {
+      pruned,
+      inspected: rows.length,
+      dryRun,
+      candidates,
+    };
+  }
+
+  // ── Access tracking ────────────────────────────────────────────
+
+  private async touchAccessed(ids: string[]): Promise<void> {
+    if (!this.table || ids.length === 0) return;
+    const now = new Date().toISOString();
+
+    for (const id of ids) {
+      try {
+        const rows = await this.table.query()
+          .where(`id = '${sanitise(id)}'`)
+          .limit(1)
+          .toArray();
+
+        if (rows.length === 0) continue;
+        const row = rows[0] as Record<string, unknown>;
+        const lastAccessed = (row.last_accessed_at as string) ?? (row.updated_at as string);
+        const hoursSince = (Date.now() - new Date(lastAccessed).getTime()) / 3_600_000;
+
+        // Spacing effect: skip increment if accessed within the last hour
+        if (hoursSince < 1) continue;
+
+        // LanceDB update: delete then re-add with incremented count
+        await this.table.delete(`id = '${sanitise(id)}'`);
+        const updatedRow = {
+          ...row,
+          access_count: ((row.access_count as number) ?? 0) + 1,
+          last_accessed_at: now,
+        };
+        await this.table.add([updatedRow]);
+      } catch {
+        // Access tracking is best-effort — don't fail the search
+      }
+    }
   }
 
   // ── Private: search strategies ─────────────────────────────────
@@ -318,6 +474,8 @@ function toRow(request: StoreRequest, vector: number[], timestamp: string): Memo
     created_at: timestamp,
     updated_at: timestamp,
     vector,
+    access_count: 0,
+    last_accessed_at: timestamp,
   };
 }
 
@@ -354,6 +512,30 @@ export function computeDecayFactor(updatedAt: string, halfLifeDays: number): num
   const ageMs = Date.now() - new Date(updatedAt).getTime();
   const ageDays = Math.max(0, ageMs / MS_PER_DAY);
   return Math.pow(0.5, ageDays / halfLifeDays);
+}
+
+/**
+ * Compute importance multiplier for a memory row. Stretches the
+ * effective half-life so important (frequently accessed, recently
+ * accessed) memories decay slower.
+ *
+ * Range: 1.0 (never accessed, old) to 3.0 (heavily accessed, recent).
+ */
+export function importanceMultiplier(row: Record<string, unknown>): number {
+  const accessCount = (row.access_count as number) ?? 0;
+  const lastAccessedAt = (row.last_accessed_at as string) ?? (row.updated_at as string);
+
+  // Access frequency boost: linear ramp, 1.0 to 2.0, capped at 20 accesses
+  const accessBoost = 1 + Math.min(accessCount, 20) / 20;
+
+  // Recency of access: recently-accessed memories are clearly still useful
+  const daysSinceAccess = Math.max(
+    0,
+    (Date.now() - new Date(lastAccessedAt).getTime()) / MS_PER_DAY,
+  );
+  const recencyBoost = daysSinceAccess < 7 ? 1.5 : daysSinceAccess < 30 ? 1.2 : 1.0;
+
+  return accessBoost * recencyBoost; // range: 1.0 to 3.0
 }
 
 function isEvergreen(row: Record<string, unknown>): boolean {
@@ -399,10 +581,11 @@ function resultToSearchResult(row: Record<string, unknown>): SearchResult {
     score = 0;
   }
 
-  // Apply temporal decay unless memory is evergreen
+  // Apply importance-modulated temporal decay unless memory is evergreen
   if (DECAY_HALF_LIFE_DAYS > 0 && !isEvergreen(row)) {
     const updatedAt = row.updated_at as string;
-    score *= computeDecayFactor(updatedAt, DECAY_HALF_LIFE_DAYS);
+    const effectiveHalfLife = DECAY_HALF_LIFE_DAYS * importanceMultiplier(row);
+    score *= computeDecayFactor(updatedAt, effectiveHalfLife);
   }
 
   return { memory: rowToMemory(row), score };

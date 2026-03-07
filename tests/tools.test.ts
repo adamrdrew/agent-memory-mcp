@@ -10,6 +10,7 @@ import {
   handleUpdate,
   handleDelete,
   handleStats,
+  handlePrune,
 } from '../src/tools.js';
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -299,5 +300,52 @@ describe('stats', () => {
     const data = parseResult(result);
     expect(data.totalMemories).toBe(0);
     expect(data.oldestMemory).toBeNull();
+  });
+
+  it('returns access tracking fields', async () => {
+    const handler = handleStats(store);
+    const result = await handler();
+
+    const data = parseResult(result);
+    expect(data).toHaveProperty('neverAccessed');
+    expect(data).toHaveProperty('belowPruneThreshold');
+    expect(data).toHaveProperty('avgAccessCount');
+    expect(data).toHaveProperty('mostAccessed');
+  });
+});
+
+describe('prune', () => {
+  let store: MockMemoryStore;
+
+  beforeEach(async () => {
+    store = new MockMemoryStore();
+    await store.store({ content: 'Test memory', category: 'learning', tags: [] });
+  });
+
+  it('returns prune result with correct structure', async () => {
+    const handler = handlePrune(store);
+    const result = await handler({ dryRun: true });
+
+    expect(result.isError).toBeUndefined();
+    const data = parseResult(result);
+    expect(data).toHaveProperty('pruned');
+    expect(data).toHaveProperty('inspected');
+    expect(data).toHaveProperty('dryRun');
+    expect(data).toHaveProperty('candidates');
+    expect(data.dryRun).toBe(true);
+    expect(data.pruned).toBe(0);
+  });
+
+  it('passes options through to store', async () => {
+    const handler = handlePrune(store);
+    const result = await handler({
+      dryRun: false,
+      minStrength: 0.1,
+      maxDormantDays: 30,
+    });
+
+    expect(result.isError).toBeUndefined();
+    const data = parseResult(result);
+    expect(data.dryRun).toBe(false);
   });
 });

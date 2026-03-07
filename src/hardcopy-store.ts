@@ -5,6 +5,8 @@ import type {
   MemoryCategory,
   MemoryStore,
   MemoryStats,
+  PruneOptions,
+  PruneResult,
   SearchFilters,
   SearchMode,
   SearchResult,
@@ -74,6 +76,10 @@ export class HardcopyMemoryStore implements MemoryStore {
 
   async stats(): Promise<MemoryStats> {
     return this.inner.stats();
+  }
+
+  async prune(options: PruneOptions): Promise<PruneResult> {
+    return this.inner.prune(options);
   }
 
   // ── Private ─────────────────────────────────────────────────

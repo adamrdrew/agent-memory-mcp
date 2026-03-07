@@ -374,4 +374,158 @@ describe('LanceMemoryStore integration', () => {
       expect(results[0].score).toBeGreaterThan(0);
     });
   });
+
+  // ── Access tracking ───────────────────────────────────────────
+
+  describe('access tracking', () => {
+    it('respects spacing effect — no increment within 1 hour of creation', async () => {
+      await store.store({
+        content: 'Memory about unique hamiltonian cycles in graph theory',
+        category: 'learning',
+        tags: ['math'],
+      });
+
+      // Search immediately after creation — spacing effect should prevent
+      // increment because last_accessed_at = creation time = just now (< 1 hour)
+      await store.search('hamiltonian cycles', 'semantic', { limit: 5 });
+      await new Promise(r => setTimeout(r, 300));
+
+      // Memory should still be "never accessed" due to spacing effect
+      const stats = await store.stats();
+      expect(stats.neverAccessed).toBe(1);
+      expect(stats.avgAccessCount).toBe(0);
+    });
+
+    it('stats mostAccessed has correct structure', async () => {
+      await store.store({
+        content: 'Popular memory about vector databases and similarity',
+        category: 'architecture',
+        tags: ['databases'],
+      });
+      await store.store({
+        content: 'Obscure memory about medieval typography',
+        category: 'learning',
+        tags: ['history'],
+      });
+
+      const stats = await store.stats();
+      expect(stats.mostAccessed.length).toBe(2);
+      for (const entry of stats.mostAccessed) {
+        expect(entry).toHaveProperty('id');
+        expect(entry).toHaveProperty('content');
+        expect(entry).toHaveProperty('count');
+        expect(typeof entry.count).toBe('number');
+      }
+    });
+
+    it('new rows include access_count and last_accessed_at columns', async () => {
+      const memory = await store.store({
+        content: 'Memory to check schema',
+        category: 'learning',
+        tags: [],
+      });
+
+      // Verify through stats that the memory has correct initial state
+      const stats = await store.stats();
+      expect(stats.neverAccessed).toBe(1);
+      expect(stats.mostAccessed).toHaveLength(1);
+      expect(stats.mostAccessed[0].count).toBe(0);
+      expect(stats.mostAccessed[0].id).toBe(memory.id);
+    });
+  });
+
+  // ── Pruning ──────────────────────────────────────────────────
+
+  describe('prune', () => {
+    it('dry run returns candidates without deleting', async () => {
+      await store.store({
+        content: 'Fresh memory that should not be pruned',
+        category: 'learning',
+        tags: [],
+      });
+
+      const result = await store.prune({ dryRun: true });
+      expect(result.dryRun).toBe(true);
+      expect(result.pruned).toBe(0);
+      expect(result.inspected).toBe(1);
+      // Fresh memory should not be a prune candidate
+      expect(result.candidates).toHaveLength(0);
+    });
+
+    it('does not prune evergreen memories', async () => {
+      await store.store({
+        content: 'Evergreen memory preserved forever',
+        category: 'personal',
+        tags: ['evergreen'],
+      });
+
+      const result = await store.prune({
+        dryRun: true,
+        minStrength: 1.0, // Everything below 1.0 would be pruned
+      });
+      // Evergreen should be excluded from candidates
+      expect(result.candidates).toHaveLength(0);
+    });
+
+    it('returns empty when table has no memories', async () => {
+      const result = await store.prune({ dryRun: true });
+      expect(result.inspected).toBe(0);
+      expect(result.candidates).toHaveLength(0);
+    });
+
+    it('prune with dryRun false deletes candidates', async () => {
+      // Store a memory, then prune with very aggressive threshold
+      await store.store({
+        content: 'Memory to be pruned aggressively',
+        category: 'other',
+        tags: [],
+      });
+
+      const statsBefore = await store.stats();
+      expect(statsBefore.totalMemories).toBe(1);
+
+      // Prune with minStrength = 1.0 — only a memory updated right now has strength 1.0
+      // Our fresh memory has strength ≈ 1.0, so use maxDormantDays = 0 instead
+      const result = await store.prune({
+        dryRun: false,
+        maxDormantDays: 0, // Any never-accessed memory is eligible
+        minStrength: 0.0001, // Don't prune based on strength alone
+      });
+
+      expect(result.dryRun).toBe(false);
+      expect(result.pruned).toBe(1);
+
+      const statsAfter = await store.stats();
+      expect(statsAfter.totalMemories).toBe(0);
+    });
+  });
+
+  // ── Enhanced stats ──────────────────────────────────────────
+
+  describe('enhanced stats', () => {
+    it('returns access tracking fields', async () => {
+      await store.store({
+        content: 'Memory for stats test',
+        category: 'learning',
+        tags: [],
+      });
+
+      const stats = await store.stats();
+      expect(stats).toHaveProperty('neverAccessed');
+      expect(stats).toHaveProperty('belowPruneThreshold');
+      expect(stats).toHaveProperty('avgAccessCount');
+      expect(stats).toHaveProperty('mostAccessed');
+      expect(stats.neverAccessed).toBe(1);
+      expect(stats.avgAccessCount).toBe(0);
+      expect(stats.mostAccessed).toHaveLength(1);
+    });
+
+    it('empty store returns zero access stats', async () => {
+      const stats = await store.stats();
+      expect(stats.neverAccessed).toBe(0);
+      expect(stats.belowPruneThreshold).toBe(0);
+      expect(stats.avgAccessCount).toBe(0);
+      expect(stats.mostAccessed).toHaveLength(0);
+    });
+  });
 });
